@@ -89,64 +89,67 @@ class BooleanRetrieval:
         :param query: a boolean query in Reverse Polish Notation format
         :return: list of document ids
         """
-        print("Original query:", query)
-
         # All text is in lowercase, so the query needs to be the same
-        query = query.lower().split()
+        query_tokens = query.lower().split()
 
         # If the query is 1 word, we only need its posting list and to convert it to original doc ids
-        if len(query) == 1:
-            return self.change_to_docs_ids(self.inverted_index.get_posting_list(query[0]))
+        if len(query_tokens) == 1: return self.change_to_docs_ids(self.inverted_index.get_posting_list(query_tokens[0]))
 
-        stack = []
+        postings_stack = []
 
         # For printing the query in regular format after changing from Reverse Polish Notation format
         # africa airlines NOT should give (NOT airlines) AND africa
         expr_stack = []
-
         OPERATORS = ['and', 'or', 'not']
 
         # For each token in the query, we want to apply 'or', 'and', or 'not' on the term's posting list
-        for token in query:
+        for token in query_tokens:
             if token not in OPERATORS:
                 # For a term, we save its posting list to the stack
-                stack.append(self.inverted_index.get_posting_list(token))
+                postings_stack.append(self.inverted_index.get_posting_list(token))
                 expr_stack.append(token)
             else:
                 if token == 'and':
-                    a = stack.pop()
-                    b = stack.pop()
-                    stack.append(self.AND_func(a, b))
-                    b_expr = expr_stack.pop()
-                    a_expr = expr_stack.pop()
-                    expr_stack.append(f"({a_expr} AND {b_expr})")
+                    # right operand is the top of stack, left is next
+                    right_postings = postings_stack.pop()
+                    left_postings  = postings_stack.pop()
+                    merged_postings = self.AND_func(left_postings, right_postings)
+                    postings_stack.append(merged_postings)
 
-                if token == 'or':
-                    a = stack.pop()
-                    b = stack.pop()
-                    stack.append(self.OR_func(a, b))
-                    b_expr = expr_stack.pop()
-                    a_expr = expr_stack.pop()
-                    expr_stack.append(f"({a_expr} OR {b_expr})")
+                    right_expr = expr_stack.pop()
+                    left_expr  = expr_stack.pop()
+                    expr_stack.append(f"({left_expr} AND {right_expr})")
 
-                if token == 'not':
-                    a = stack.pop()
-                    stack.append(self.NOT_func(a))
-                    a_expr = expr_stack.pop()
-                    expr_stack.append(f"(NOT {a_expr})")
+                elif token == 'or':
+                    right_postings = postings_stack.pop()
+                    left_postings  = postings_stack.pop()
+                    merged_postings = self.OR_func(left_postings, right_postings)
+                    postings_stack.append(merged_postings)
+
+                    right_expr = expr_stack.pop()
+                    left_expr  = expr_stack.pop()
+                    expr_stack.append(f"({left_expr} OR {right_expr})")
+
+                else:  # token == 'not'
+                    operand_postings = postings_stack.pop()
+                    negated_postings = self.NOT_func(operand_postings)
+                    postings_stack.append(negated_postings)
+
+                    operand_expr = expr_stack.pop()
+                    expr_stack.append(f"(NOT {operand_expr})")
 
         # In Reverse Polish Notation, sometimes 'AND' isn't noted,
         # so we need to check if there are 2 remaining posting lists in the stack and apply 'AND' to them
-        if len(stack) == 2:
-            a = stack.pop()
-            b = stack.pop()
-            internal_id_docs = self.AND_func(a, b)
-            a_expr = expr_stack.pop()
-            b_expr = expr_stack.pop()
-            expr_stack.append(f"({b_expr} AND {a_expr})")
+        if len(postings_stack) == 2:
+            right_postings = postings_stack.pop()
+            left_postings  = postings_stack.pop()
+            internal_id_docs = self.AND_func(left_postings, right_postings)
 
+            right_expr = expr_stack.pop()
+            left_expr  = expr_stack.pop()
+            expr_stack.append(f"({left_expr} AND {right_expr})")
         else:
-            internal_id_docs = stack.pop()
+            internal_id_docs = postings_stack.pop()
 
         print("Final executed query:", expr_stack[-1])
 
@@ -164,6 +167,33 @@ class BooleanRetrieval:
             docs_ids.append(self.inverted_index.get_real_doc_id(id))
 
         return docs_ids
+
+    def NOT_func(self, posting_list: list) -> list:
+        """
+        Find the complement of the posting list
+        :param a: list
+        :return: complementary of posting list
+        """
+        not_docs = []
+        num_docs = self.inverted_index.get_number_of_documents()
+        # All documents internal ids in one posting list
+        all_docs = [i for i in range(1, num_docs + 1)]
+
+        i, j = 0, 0
+
+        while i < len(posting_list):
+            if all_docs[j] != posting_list[i]:
+                not_docs.append(all_docs[j])
+                j += 1
+            else:
+                i += 1
+                j += 1
+
+        while j < num_docs:
+            not_docs.append(all_docs[j])
+            j += 1
+
+        return not_docs
 
     @staticmethod
     def AND_func(left_postings: list, right_postings: list) -> list:
@@ -209,43 +239,16 @@ class BooleanRetrieval:
                 j += 1
 
         if i == len(left_postings) and j != len(right_postings):
-            while j < len(b):
+            while j < len(right_postings):
                 union_docs.append(right_postings[j])
                 j += 1
 
-        if j == len(b) and i != len(a):
-            while i < len(a):
+        if j == len(right_postings) and i != len(left_postings):
+            while i < len(left_postings):
                 union_docs.append(left_postings[i])
                 i += 1
 
         return union_docs
-
-    def NOT_func(self, posting_list: list) -> list:
-        """
-        Find the complement of the posting list
-        :param a: list
-        :return: complementary of posting list
-        """
-        not_docs = []
-        num_docs = self.inverted_index.get_number_of_documents()
-        # All documents internal ids in one posting list
-        all_docs = [i for i in range(1, num_docs + 1)]
-
-        i, j = 0, 0
-
-        while i < len(posting_list):
-            if all_docs[j] != posting_list[i]:
-                not_docs.append(all_docs[j])
-                j += 1
-            else:
-                i += 1
-                j += 1
-
-        while j < num_docs:
-            not_docs.append(all_docs[j])
-            j += 1
-
-        return not_docs
 
 
 if __name__ == "__main__":
